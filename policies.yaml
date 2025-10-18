@@ -1,0 +1,85 @@
+version: 1
+subject:
+  sex: male
+  body_weight_kg: 73
+units: grams_per_day
+per_category_daily_max_g:
+  nutrients:
+    Protein: null
+    Carbohydrates: null
+    Creatine monohydrate: 5.0
+    Water: null
+    Sodium: 2.3
+    Iron: 0.04
+    Cholecalciferol: 0.0001
+    Magnesium: 0.35
+    Zinc: 0.025
+    Potassium: null
+    Calcium: 2.5
+    Eicosapentaenoic acid: null
+    Docosahexaenoic acid: null
+    Alpha-linolenic acid: null
+    Thiamine: null
+    Riboflavin: null
+    Niacin: 0.035
+    Pantothenic acid: null
+    Pyridoxine: 0.012
+    Biotin: null
+    Folate: 0.001
+    Cobalamin: null
+    Iodine: 0.0006
+    Selenium: 0.000255
+    Phosphorus: 4.0
+    Copper: 0.005
+    Manganese: null
+    Choline: 3.5
+    Ascorbic acid: 2.0
+    Phylloquinone: null
+    Menaquinones: null
+    Retinol: 0.003
+    Alpha-tocopherol: 1.0
+    Chloride: null
+    Molybdenum: 0.002
+    Chromium: null
+    Linoleic acid: null
+    Arachidonic acid: null
+    Oleic acid: null
+
+  toxins:
+    Lead(II): "ALARA"
+    Methylmercury: 0.0000073
+    Inorganic arsenic: "ALARA"
+    Cadmium(II): 0.0000261
+    2,3,7,8-Tetrachlorodibenzo-p-dioxin: 0.0000000000209
+    Polychlorinated biphenyls: "ALARA"
+    Aflatoxin B1: "ALARA"
+    Benzo[a]pyrene: "ALARA"
+    N-Nitrosodimethylamine: "ALARA"
+    Perfluorooctanoic acid: "ALARA"
+    Perfluorooctanesulfonic acid: "ALARA"
+    Ochratoxin A: 0.000001168
+    Fumonisin B1: 0.000073
+    Deoxynivalenol: 0.000073
+    Zearalenone: 0.00001825
+    Patulin: 0.0000292
+    Bisphenol A: 0.0000000146
+    Di(2-ethylhexyl) phthalate: null
+    Diisononyl phthalate: null
+    Perchlorate: 0.0000511
+    Aluminum(III): 0.0104286
+    Nickel(II): 0.000949
+    Tin(II): 0.146
+    Tin(IV): 0.146
+    Acrylamide: "ALARA"
+    2-Amino-1-methyl-6-phenylimidazo[4,5-b]pyridine: "ALARA"
+    2-Amino-3,8-dimethylimidazo[4,5-f]quinoxaline: "ALARA"
+    N-Nitrosamines: "ALARA"
+    Hydrogen cyanide: "ALARA"
+    Solanine: "ALARA"
+    Tomatine: "ALARA"
+    Histamine: null
+    Domoic acid: 0.00219
+    Saxitoxin: 0.0000365
+    Brevetoxin: 0.0000183
+    Microcystin-LR: 0.00000292
+    
