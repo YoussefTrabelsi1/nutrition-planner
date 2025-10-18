@@ -1,0 +1,16 @@
+[project]
+name = "myapp"              # any name, not used in imports
+version = "0.0.1"
+requires-python = ">=3.9"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# Tell setuptools to package the *folder named `src`* as a top-level package.
+[tool.setuptools]
+packages = ["src"]
+
+# (Nice to have) pytest config in the same file
+[tool.pytest.ini_options]
+testpaths = ["tests"]
