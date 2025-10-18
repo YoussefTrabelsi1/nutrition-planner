@@ -2,7 +2,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from io_loader import load_problem
-from optimize import solve_lp, compute_totals
+from optimize import solve_lp_only, solve_greedy
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA = DEFAULT_ROOT / "data"
@@ -13,9 +13,17 @@ def run(foods: Path | None = None, budget: Path | None = None, priorities: Path 
     budget_p = budget or (DEFAULT_DATA / "budget.csv")
     prio_p = priorities or (DEFAULT_DATA / "priorities.yaml")
     prob = load_problem(foods_p, budget_p, prio_p)
-    plan, totals = solve_lp(prob)
 
-    print("Chosen plan (food -> grams):")
+    res = solve_lp_only(prob)
+    if res is None:
+        # Fallback
+        plan, totals = solve_greedy(prob)
+        used = "greedy"
+    else:
+        plan, totals = res
+        used = "LP"
+
+    print(f"Chosen plan ({used}) (food -> grams):")
     if not plan:
         print("  <empty>")
     for k, v in sorted(plan.items()):

@@ -1,47 +1,11 @@
 from __future__ import annotations
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 from models import Problem, Food
 
 
-def solve_lp(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """Try LP with PuLP; minimize calories with constraints. Returns (plan, totals)."""
-    try:
-        import pulp  # type: ignore
-    except Exception:
-        return solve_greedy(problem)
-
-    foods = problem.foods
-    targets = problem.targets
-
-    # Decision variables: grams per food, 0..max_serving_g
-    x = {f.name: pulp.LpVariable(f"g_{f.name}", lowBound=0, upBound=f.max_serving_g) for f in foods}
-    model = pulp.LpProblem("nutrition_min_kcal", pulp.LpMinimize)
-
-    # Objective: minimize calories
-    model += pulp.lpSum([x[f.name] * (f.kcal_per_100g / 100.0) for f in foods])
-
-    # Min constraints (per nutrient)
-    for key, need in targets.mins.items():
-        model += pulp.lpSum([x[f.name] * (f.per100.get(key, 0.0) / 100.0) for f in foods]) >= need
-
-    # Max constraints (toxins)
-    for key, cap in targets.maxes.items():
-        model += pulp.lpSum([x[f.name] * (f.per100.get(key, 0.0) / 100.0) for f in foods]) <= cap
-
-    # Calorie budget
-    model += pulp.lpSum([x[f.name] * (f.kcal_per_100g / 100.0) for f in foods]) <= targets.kcal_remaining
-
-    # Solve
-    model.solve(pulp.PULP_CBC_CMD(msg=False))
-
-    if pulp.LpStatus[model.status] != "Optimal":
-        # Fallback to greedy if infeasible or not optimal
-        return solve_greedy(problem)
-
-    plan = {f.name: float(x[f.name].value()) for f in foods if float(x[f.name].value() or 0.0) > 1e-6}
-    totals = compute_totals(problem, plan)
-    return plan, totals
+def _omit_near_zero(plan: Dict[str, float], eps: float = 1e-6) -> Dict[str, float]:
+    return {k: v for k, v in plan.items() if v > eps}
 
 
 def compute_totals(problem: Problem, plan: Dict[str, float]) -> Dict[str, float]:
@@ -54,6 +18,48 @@ def compute_totals(problem: Problem, plan: Dict[str, float]) -> Dict[str, float]
         for k, v in f.per100.items():
             totals[k] = totals.get(k, 0.0) + g * (v / 100.0)
     return totals
+
+
+def solve_lp_only(problem: Problem) -> Optional[Tuple[Dict[str, float], Dict[str, float]]]:
+    """Generic LP builder/solver.
+    Returns (plan, totals) if status is Optimal; returns None if PuLP missing
+    or the model is infeasible/non-optimal.
+    """
+    try:
+        import pulp  # type: ignore
+    except Exception:
+        return None
+
+    foods = problem.foods
+    targets = problem.targets
+
+    # Decision variables: grams per food, 0..max_serving_g
+    x = {f.name: pulp.LpVariable(f"g_{f.name}", lowBound=0, upBound=f.max_serving_g) for f in foods}
+    model = pulp.LpProblem("nutrition_min_kcal", pulp.LpMinimize)
+
+    # Objective: minimize calories
+    model += pulp.lpSum([x[f.name] * (f.kcal_per_100g / 100.0) for f in foods])
+
+    # Calorie budget
+    model += pulp.lpSum([x[f.name] * (f.kcal_per_100g / 100.0) for f in foods]) <= targets.kcal_remaining
+
+    # Min constraints (any nutrient present in mins)
+    for key, need in targets.mins.items():
+        model += pulp.lpSum([x[f.name] * (f.per100.get(key, 0.0) / 100.0) for f in foods]) >= need
+
+    # Max constraints (any compound present in maxes)
+    for key, cap in targets.maxes.items():
+        model += pulp.lpSum([x[f.name] * (f.per100.get(key, 0.0) / 100.0) for f in foods]) <= cap
+
+    # Solve silently
+    model.solve(pulp.PULP_CBC_CMD(msg=False))
+    if pulp.LpStatus[model.status] != "Optimal":
+        return None
+
+    plan = {f.name: float(x[f.name].value() or 0.0) for f in foods}
+    plan = _omit_near_zero(plan)
+    totals = compute_totals(problem, plan)
+    return plan, totals
 
 
 def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
@@ -140,16 +146,28 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
         for k, v in best.per100.items():
             totals[k] = totals.get(k, 0.0) + add * (v / 100.0)
         # Enforce toxin caps strictly
+        violated = False
         for t, cap in maxes.items():
             if totals.get(t, 0.0) > cap + 1e-9:
-                # rollback
-                plan[best.name] -= add
-                totals["kcal"] -= add * (best.kcal_per_100g / 100.0)
-                for k, v in best.per100.items():
-                    totals[k] -= add * (v / 100.0)
-                # Mark this food as exhausted to avoid infinite loop
-                plan[best.name] = best.max_serving_g
+                violated = True
                 break
-    # Prune zeros
-    plan = {k: v for k, v in plan.items() if v > 1e-6}
+        if violated:
+            # rollback
+            plan[best.name] -= add
+            totals["kcal"] -= add * (best.kcal_per_100g / 100.0)
+            for k, v in best.per100.items():
+                totals[k] -= add * (v / 100.0)
+            # Mark this food as exhausted to avoid infinite loop
+            plan[best.name] = best.max_serving_g
+            continue
+
+    plan = _omit_near_zero(plan)
     return plan, totals
+
+
+def solve_lp(problem: Problem):
+    """Orchestrator kept for backward-compat: try LP-only; if None, fall back to greedy."""
+    res = solve_lp_only(problem)
+    if res is not None:
+        return res
+    return solve_greedy(problem)
