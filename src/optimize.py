@@ -92,6 +92,7 @@ def solve_lp_only(problem: Problem, allow_soft: bool = False) -> Optional[Tuple[
     try:
         import pulp  # type: ignore
     except Exception:
+        from .optimize import _soft_lp  # type: ignore  # circular in this snippet context
         return _soft_lp(problem, problem.priorities) if allow_soft else None
 
     foods = problem.foods
@@ -131,7 +132,18 @@ def solve_lp_only(problem: Problem, allow_soft: bool = False) -> Optional[Tuple[
 
 
 def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
-    """Deterministic, priority-aware greedy fallback with optional category caps."""
+    """
+    Deterministic, priority-aware greedy fallback with:
+      - Category caps, toxin penalty.
+      - NEW: Strict *avoidance* of overshooting any already-met min when alternatives exist.
+             We prefer foods where a chunk does NOT push any min above its target.
+             Only if *all* candidates would overshoot do we allow it (then we still cap
+             the added grams to keep overshoot minimal).
+
+    Scoring per kcal (using per-100g data):
+        score(food) = sum_n (w[n]*per100[n]) / kcal_per_100g
+                       - toxin_penalty * (sum_t per100[toxin]) / (kcal_per_100g * 1000)
+    """
     foods = problem.foods
     mins = problem.targets.mins
     maxes = problem.targets.maxes
@@ -141,8 +153,6 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
     cat_caps = problem.category_caps_g or {}
 
     CHUNK_G = 25.0
-    # New: gentle penalty discouraging piling onto already-satisfied nutrients
-    OVERSHOOT_PENALTY = 0.5  # set to 0 to disable; tune 0.1–0.3
 
     plan: Dict[str, float] = {f.name: 0.0 for f in foods}
     totals: Dict[str, float] = {"kcal": 0.0}
@@ -159,6 +169,7 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
         return sum(plan[f.name] for f in foods if (f.category or "").strip().lower() == c)
 
     def max_add_by_caps(f: Food) -> float:
+        """Hard caps from servings, kcal, toxins, category."""
         rem_serv = max(0.0, f.max_serving_g - plan[f.name])
         if rem_serv <= 0:
             return 0.0
@@ -182,6 +193,23 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
                 g_cap = min(g_cap, remaining_cat)
         return max(0.0, g_cap)
 
+    def non_overshoot_cap(f: Food) -> float:
+        """
+        Max grams we can add without pushing *any* min beyond its need.
+        If the food adds to a nutrient that's already >= need, this returns 0.
+        """
+        cap = float("inf")
+        for k, need in mins.items():
+            per_g = f.per100.get(k, 0.0) / 100.0
+            if per_g <= 0:
+                continue
+            head = need - totals.get(k, 0.0)
+            if head <= 1e-12:
+                # Already at/over need; any positive addition would overshoot this nutrient
+                return 0.0
+            cap = min(cap, head / per_g)
+        return 0.0 if cap == float("inf") else max(0.0, cap)
+
     def score_food(f: Food) -> float:
         kcal100 = max(f.kcal_per_100g, 1e-6)
         # Benefit only from unmet mins
@@ -189,60 +217,68 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
         for n, w in weights.items():
             if mins.get(n, 0.0) > totals.get(n, 0.0) + 1e-9:
                 benefit += w * f.per100.get(n, 0.0)
-
-        # Toxin cost
+        # Toxin cost (independent of distance to caps)
         toxin_sum = sum(f.per100.get(t, 0.0) for t in maxes.keys())
         toxin_cost = toxin_penalty * (toxin_sum / (kcal100 * 1000.0))
-
-        # New: overshoot discouragement (gentle). Penalize current surplus on already-met mins.
-        # This does NOT forbid overshoot; it just nudges choices away when there are alternatives.
-        overshoot_sum = 0.0
-        if OVERSHOOT_PENALTY > 0:
-            for n, w in weights.items():
-                need = mins.get(n, None)
-                if need is None:
-                    continue
-                have = totals.get(n, 0.0)
-                if have > need + 1e-9:
-                    overshoot_sum += w * (have - need)  # in same units as n
-        overshoot_cost = OVERSHOOT_PENALTY * (overshoot_sum / kcal100)
-
-        return (benefit / kcal100) - toxin_cost - overshoot_cost
+        return (benefit / kcal100) - toxin_cost
 
     for _ in range(10000):
         if not unmet_exist() or kcal_remaining() <= 1e-9:
             break
-        candidates: List[Tuple[float, Food]] = []
+
+        # Build candidates and classify as CLEAN (no overshoot possible for a chunk) vs DIRTY
+        clean: List[Tuple[float, float, Food]] = []  # (score, add_cap, food)
+        dirty: List[Tuple[float, float, Food]] = []
+
         for f in foods:
             if exhausted[f.name]:
                 continue
             # Must help at least one unmet nutrient
-            contributes = any(
-                f.per100.get(n, 0.0) > 0 and mins.get(n, 0.0) > totals.get(n, 0.0) + 1e-9
-                for n in mins
-            )
-            if not contributes:
+            if not any(f.per100.get(n, 0.0) > 0 and mins.get(n, 0.0) > totals.get(n, 0.0) + 1e-9 for n in mins):
                 continue
-            candidates.append((score_food(f), f))
-        if not candidates:
-            break
-        candidates.sort(key=lambda x: (-x[0], x[1].name))
-        progressed = False
-        for _, f in candidates:
-            g_cap = max_add_by_caps(f)
-            if g_cap <= 1e-9:
+
+            hard_cap = max_add_by_caps(f)
+            if hard_cap <= 1e-9:
                 exhausted[f.name] = True
                 continue
-            add = min(CHUNK_G, g_cap)
+
+            no_cap = non_overshoot_cap(f)  # cap to avoid exceeding any need
+            # Proposed addition without overshoot
+            add_clean = min(CHUNK_G, hard_cap, no_cap) if no_cap > 0 else 0.0
+            s = score_food(f)
+
+            if add_clean > 1e-9:
+                clean.append((s, add_clean, f))
+            else:
+                # If we can't add even a small amount without overshoot, classify as dirty
+                # We'll only consider these if there are no clean candidates.
+                # Also cap "dirty" add to the minimal overshoot to progress.
+                # Compute minimal grams to progress at least one unmet nutrient but keep overshoot tiny.
+                add_dirty = min(CHUNK_G, hard_cap)
+                if add_dirty > 1e-9:
+                    dirty.append((s, add_dirty, f))
+
+        picked_list = clean if clean else dirty
+        if not picked_list:
+            break
+
+        # Deterministic ordering: highest score, tie by name
+        picked_list.sort(key=lambda x: (-x[0], x[2].name))
+
+        progressed = False
+        for s, add_cap, f in picked_list:
+            add = add_cap
             if add <= 1e-9:
                 exhausted[f.name] = True
                 continue
+            # Apply addition
             plan[f.name] += add
             totals["kcal"] = totals.get("kcal", 0.0) + add * (f.kcal_per_100g / 100.0)
             for k, v in f.per100.items():
                 totals[k] = totals.get(k, 0.0) + add * (v / 100.0)
             progressed = True
             break
+
         if not progressed:
             break
 
