@@ -141,6 +141,9 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
     cat_caps = problem.category_caps_g or {}
 
     CHUNK_G = 25.0
+    # New: gentle penalty discouraging piling onto already-satisfied nutrients
+    OVERSHOOT_PENALTY = 0.5  # set to 0 to disable; tune 0.1–0.3
+
     plan: Dict[str, float] = {f.name: 0.0 for f in foods}
     totals: Dict[str, float] = {"kcal": 0.0}
     exhausted: Dict[str, bool] = {f.name: False for f in foods}
@@ -171,7 +174,7 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
             if head <= 1e-12:
                 return 0.0
             g_cap = min(g_cap, head / per_g)
-        # category cap
+        # category caps
         if cat_caps:
             cat = (f.category or "").strip().lower()
             if cat in cat_caps:
@@ -181,12 +184,30 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
 
     def score_food(f: Food) -> float:
         kcal100 = max(f.kcal_per_100g, 1e-6)
+        # Benefit only from unmet mins
         benefit = 0.0
         for n, w in weights.items():
             if mins.get(n, 0.0) > totals.get(n, 0.0) + 1e-9:
                 benefit += w * f.per100.get(n, 0.0)
+
+        # Toxin cost
         toxin_sum = sum(f.per100.get(t, 0.0) for t in maxes.keys())
-        return (benefit / kcal100) - toxin_penalty * (toxin_sum / (kcal100 * 1000.0))
+        toxin_cost = toxin_penalty * (toxin_sum / (kcal100 * 1000.0))
+
+        # New: overshoot discouragement (gentle). Penalize current surplus on already-met mins.
+        # This does NOT forbid overshoot; it just nudges choices away when there are alternatives.
+        overshoot_sum = 0.0
+        if OVERSHOOT_PENALTY > 0:
+            for n, w in weights.items():
+                need = mins.get(n, None)
+                if need is None:
+                    continue
+                have = totals.get(n, 0.0)
+                if have > need + 1e-9:
+                    overshoot_sum += w * (have - need)  # in same units as n
+        overshoot_cost = OVERSHOOT_PENALTY * (overshoot_sum / kcal100)
+
+        return (benefit / kcal100) - toxin_cost - overshoot_cost
 
     for _ in range(10000):
         if not unmet_exist() or kcal_remaining() <= 1e-9:
@@ -195,7 +216,11 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
         for f in foods:
             if exhausted[f.name]:
                 continue
-            contributes = any(f.per100.get(n, 0.0) > 0 and mins.get(n, 0.0) > totals.get(n, 0.0) + 1e-9 for n in mins)
+            # Must help at least one unmet nutrient
+            contributes = any(
+                f.per100.get(n, 0.0) > 0 and mins.get(n, 0.0) > totals.get(n, 0.0) + 1e-9
+                for n in mins
+            )
             if not contributes:
                 continue
             candidates.append((score_food(f), f))
