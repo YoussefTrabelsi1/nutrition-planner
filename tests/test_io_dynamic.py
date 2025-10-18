@@ -24,7 +24,7 @@ def test_dynamic_add_vitd_parses():
             1000,10
             """
         ))
-        prio = write(root, "priorities.yaml", "priorities: {vitd_mcg: 1.0}\")
+        prio = write(root, "priorities.yaml", "priorities: {vitd_mcg: 1.0}")
         prob = load_problem(foods, budget, prio)
         assert "vitd_mcg" in prob.targets.mins
         assert prob.targets.mins["vitd_mcg"] == 10
