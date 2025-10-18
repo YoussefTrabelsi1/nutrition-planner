@@ -1,0 +1,43 @@
+priorities:
+  protein_g: 1.00
+  carbohydrates_g: 0.95
+  creatine_monohydrate_g: 0.90
+  water_g: 0.85
+  sodium_mg: 0.85
+  iron_mg: 0.80
+  cholecalciferol_mcg: 0.75
+  magnesium_mg: 0.70
+  zinc_mg: 0.65
+  potassium_mg: 0.60
+  calcium_mg: 0.55
+  eicosapentaenoic_acid_mg: 0.50
+  docosahexaenoic_acid_mg: 0.50
+  alpha_linolenic_acid_mg: 0.50
+  thiamine_mg: 0.45
+  riboflavin_mg: 0.45
+  niacin_mg: 0.45
+  pantothenic_acid_mg: 0.45
+  pyridoxine_mg: 0.45
+  biotin_mcg: 0.45
+  folate_mcg: 0.45
+  cobalamin_mcg: 0.45
+  iodine_mcg: 0.40
+  selenium_mcg: 0.40
+  phosphorus_mg: 0.35
+  copper_mg: 0.35
+  manganese_mg: 0.35
+  choline_mg: 0.30
+  ascorbic_acid_mg: 0.25
+  phylloquinone_mcg: 0.25
+  menaquinones_mcg: 0.25
+  retinol_mcg: 0.25
+  alpha_tocopherol_mg: 0.25
+  chloride_mg: 0.20
+  molybdenum_mcg: 0.20
+  chromium_mcg: 0.20
+  linoleic_acid_mg: 0.15
+  arachidonic_acid_mg: 0.15
+  oleic_acid_mg: 0.10
+
+
+toxin_penalty: 0.50
