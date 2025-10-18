@@ -1,2 +1,5 @@
 env/
 src/__pycahce__
+.venv/
+__pycache__/
+myapp.egg-info/
