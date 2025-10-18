@@ -1,4 +1,3 @@
-````markdown
 # nutrition-planner
 
 Low-calorie ingredient planner that **meets daily macro/micro targets** and **respects toxicity caps** with a **protein-first bias** by default. CSV-driven and unit-safe.
@@ -91,7 +90,3 @@ Covers smoke LP/greedy, dynamic I/O parsing, generic LP builder, and greedy beha
 
 ---
 
-If you want a tiny test for the vitamin-C infeasible case (as in the ticket), say the word and I’ll add `tests/test_diagnostics.py`.
-
-```
-```
