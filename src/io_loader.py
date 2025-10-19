@@ -41,7 +41,7 @@ def _detect_food_metrics(headers: List[str]) -> Tuple[Dict[str, str], Dict[str, 
     header_to_key: Dict[str, str] = {}
 
     for h in headers:
-        if h in REQUIRED_FOOD_BASE:
+        if h in REQUIRED_FOOD_BASE or h == "daily_max_g":
             continue
         if "_per_100g" in h:
             m = FOODS_RE.match(h)
@@ -117,6 +117,11 @@ def load_problem(
         kcal = _f(row.get("kcal_per_100g"), 0.0)
         maxg = _f(row.get("max_serving_g"), 0.0)
         category = (row.get("category") or "").strip()
+        daily_max_g = None
+        if "daily_max_g" in row and str(row.get("daily_max_g") or "").strip() != "":
+            daily_max_g = _f(row.get("daily_max_g"), 0.0)
+            if daily_max_g <= 0:
+                raise SchemaError(f"daily_max_g must be > 0 if provided (food '{name}')")
         if maxg <= 0 or kcal < 0:
             raise SchemaError(
                 f"Invalid numeric in foods for '{name}': max_serving_g>0 and kcal>=0 required"
@@ -131,7 +136,14 @@ def load_problem(
                 raise SchemaError(f"Negative value not allowed in foods column '{h}' for '{name}'")
             per100[key] = x
             all_keys_in_foods.add(key)
-        foods.append(Food(name=name, kcal_per_100g=kcal, max_serving_g=maxg, category=category, per100=per100))
+        foods.append(Food(
+            name=name,
+            kcal_per_100g=kcal,
+            max_serving_g=maxg,
+            category=category,
+            per100=per100,
+            daily_max_g=daily_max_g,
+        ))
 
     # Budget
     budget_rows = _read_csv(budget_path)
@@ -171,11 +183,10 @@ def load_problem(
     for k in unused:
         print(f"Warning: '{k}' appears in foods.csv but not in budget.csv; it will not be targeted.")
 
-    # Policies (Ticket 8) — optional
+    # Policies (optional per-category caps; unchanged)
     category_caps_g: Dict[str, float] | None = None
     p_path = policies_path
     if p_path is None and priorities_path is not None:
-        # default to sibling of priorities if provided
         p_path = priorities_path.parent / "policies.yaml"
     if p_path and p_path.exists():
         with p_path.open("r", encoding="utf-8") as f:
@@ -192,7 +203,7 @@ def load_problem(
             canonical[str(k).strip().lower()] = cap
         category_caps_g = canonical if canonical else None
 
-    # Priorities (Ticket 7)
+    # Priorities (ticket 7 behavior; unchanged)
     priorities: Dict[str, float] = {}
     toxin_penalty = 0.5
     if priorities_path and priorities_path.exists():
@@ -213,7 +224,6 @@ def load_problem(
                 toxin_penalty = 0.5
         priorities = normalize_to_range(priorities, 0.2, 1.0)
     else:
-        # Derive from mins keys deterministically (alphabetical pseudo-rank)
         rank_map: Dict[str, int] = {k: i for i, k in enumerate(sorted(mins.keys()), start=1)}
         priorities = derive_priorities_from_ranks(rank_map)
         priorities = normalize_to_range(priorities, 0.2, 1.0)

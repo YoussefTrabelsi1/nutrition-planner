@@ -132,28 +132,22 @@ def solve_lp_only(problem: Problem, allow_soft: bool = False) -> Optional[Tuple[
 
 def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
     """
-    Deterministic, priority-aware greedy that **does not overshoot targets**,
-    unless *every* available food would overshoot (then allows tiny 2% wiggle).
-
-    Core tweaks vs previous version:
-      1) **Deficit-weighted scoring per kcal**:
-         benefit_per_g = Σ_n w[n] * min(deficit[n], per_g[n])
-         score = benefit_per_g / kcal_per_g - toxin_penalty * toxin_per_g
-      2) **Tight add cap** to avoid overshooting unmet nutrients:
-         g_def_cap = min_n ( deficit[n] / per_g[n] ) over n with deficit>0 and per_g[n]>0
-      3) **Small overshoot tolerance** (2%) for already-met nutrients to avoid dead-ends.
-      4) Respects kcal, serving, toxin, and optional category caps.
+    Deterministic greedy with **dynamic deprioritization**:
+      - Nutrients whose targets are met keep a *minimal* weight (equal to the least weight
+        among all nutrients), while unmet nutrients retain their configured weights.
+      - This gently steers away from piling onto met nutrients, without forbidding collateral intake.
+      - Enforces kcal cap, toxin caps, optional category caps, and **per-food daily cap** (daily_max_g).
     """
     foods = problem.foods
     mins = problem.targets.mins
     maxes = problem.targets.maxes
     kcal_cap = problem.targets.kcal_remaining
-    weights = problem.priorities or {k: 1.0 for k in mins}
+    base_w = problem.priorities or {k: 1.0 for k in mins}
+    min_w = min(base_w.values()) if base_w else 0.2
     toxin_penalty = problem.toxin_penalty
     cat_caps = problem.category_caps_g or {}
 
     CHUNK_G = 25.0
-    MET_OVERSHOOT_TOL = 0.02  # allow up to +2% on nutrients already met only if no clean option exists
 
     plan: Dict[str, float] = {f.name: 0.0 for f in foods}
     totals: Dict[str, float] = {"kcal": 0.0}
@@ -172,14 +166,22 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
         c = (cat or "").strip().lower()
         return sum(plan[f.name] for f in foods if (f.category or "").strip().lower() == c)
 
-    def hard_caps_for_food(f: Food) -> float:
-        """Max grams permitted by serving, kcal, toxin caps, and category caps."""
+    def hard_cap_for_food(f: Food) -> float:
+        """Max grams permitted by serving, kcal, toxins, category, and daily_max_g."""
+        # serving & daily cap
         rem_serv = max(0.0, f.max_serving_g - plan[f.name])
         if rem_serv <= 0:
             return 0.0
+        if f.daily_max_g is not None:
+            rem_daily = max(0.0, f.daily_max_g - plan[f.name])
+            if rem_daily <= 0:
+                return 0.0
+            g_cap = min(rem_serv, rem_daily)
+        else:
+            g_cap = rem_serv
+        # kcal
         kpg = max(f.kcal_per_100g / 100.0, 1e-9)
-        rem_kcal_g = kcal_remaining() / kpg if kpg > 0 else rem_serv
-        g_cap = min(rem_serv, rem_kcal_g)
+        g_cap = min(g_cap, kcal_remaining() / kpg)
         # toxins
         for t, cap in maxes.items():
             per_g = f.per100.get(t, 0.0) / 100.0
@@ -197,118 +199,76 @@ def solve_greedy(problem: Problem) -> Tuple[Dict[str, float], Dict[str, float]]:
                 g_cap = min(g_cap, remaining_cat)
         return max(0.0, g_cap)
 
-    def g_cap_unmet(f: Food, d: Dict[str, float]) -> float:
-        """Cap to avoid overshooting any **unmet** nutrient."""
-        cap = float("inf")
-        has_binding = False
-        for k, deficit in d.items():
-            if deficit <= 1e-12:
-                continue
-            per_g = f.per100.get(k, 0.0) / 100.0
-            if per_g <= 0:
-                continue
-            cap = min(cap, deficit / per_g)
-            has_binding = True
-        if not has_binding:
-            return 0.0  # this food doesn't help any unmet nutrient
-        return max(0.0, cap)
-
-    def g_cap_met(f: Food, tol: float) -> float:
-        """Cap to avoid pushing any **already-met** nutrient beyond (1+tol)*need."""
-        cap = float("inf")
-        touched = False
-        for k, need in mins.items():
-            per_g = f.per100.get(k, 0.0) / 100.0
-            if per_g <= 0:
-                continue
-            have = totals.get(k, 0.0)
-            if have + 1e-12 >= need:  # met or above
-                limit = (need * (1.0 + tol) - have) / per_g
-                cap = min(cap, max(0.0, limit))
-                touched = True
-        if not touched:
-            return float("inf")
-        return cap
-
-    def score_food(f: Food, d: Dict[str, float]) -> float:
-        """Deficit-weighted marginal value per kcal minus toxin per kcal."""
-        kcal_per_g = max(f.kcal_per_100g / 100.0, 1e-9)
-        # Weighted benefit per gram with saturation at deficit
-        benefit_per_g = 0.0
-        for n, w in weights.items():
+    def dynamic_weights(d: Dict[str, float]) -> Dict[str, float]:
+        """If a nutrient is met (d[n]==0), assign it the minimal weight; keep others at base weight."""
+        w: Dict[str, float] = {}
+        for n in mins.keys():
             if d.get(n, 0.0) <= 1e-12:
-                continue
+                w[n] = min_w
+            else:
+                w[n] = base_w.get(n, min_w)
+        return w
+
+    def score_food(f: Food, d: Dict[str, float], w: Dict[str, float]) -> float:
+        kcal_per_g = max(f.kcal_per_100g / 100.0, 1e-9)
+        # Weighted benefit per gram (saturate at the remaining deficit so we don't over-reward)
+        benefit_per_g = 0.0
+        for n, wn in w.items():
             per_g = f.per100.get(n, 0.0) / 100.0
             if per_g <= 0:
                 continue
-            benefit_per_g += w * min(d[n], per_g)
-        toxin_per_g = 0.0
-        for t in maxes.keys():
-            toxin_per_g += f.per100.get(t, 0.0) / 100.0
-        return (benefit_per_g / kcal_per_g) - toxin_penalty * (toxin_per_g / max(kcal_per_g, 1e-9))
+            need_left = d.get(n, 0.0)
+            if need_left <= 0:
+                # Met nutrients still get smallest weight, but saturate at zero deficit
+                continue
+            benefit_per_g += wn * min(need_left, per_g)
+        # Toxin penalty per gram (scaled per kcal)
+        toxin_per_g = sum(f.per100.get(t, 0.0) / 100.0 for t in maxes.keys())
+        return (benefit_per_g / kcal_per_g) - toxin_penalty * (toxin_per_g / max(kcal_per_g, 1e-12))
 
     for _ in range(10000):
         if not unmet_exist() or kcal_remaining() <= 1e-9:
             break
         d = deficits()
+        w = dynamic_weights(d)
 
-        # Build candidate (score, clean_add_cap, dirty_add_cap, food)
-        candidates: List[Tuple[float, float, float, Food]] = []
+        candidates: List[Tuple[float, float, Food]] = []
         for f in foods:
             if exhausted[f.name]:
                 continue
-            hard_cap = hard_caps_for_food(f)
-            if hard_cap <= 1e-9:
+            # Must help at least one unmet nutrient to be considered
+            if not any((f.per100.get(n, 0.0) > 0 and d.get(n, 0.0) > 1e-12) for n in mins.keys()):
+                continue
+            g_cap = min(CHUNK_G, hard_cap_for_food(f))
+            if g_cap <= 1e-9:
                 exhausted[f.name] = True
                 continue
-            cap_unmet = g_cap_unmet(f, d)
-            if cap_unmet <= 1e-9:
-                # doesn't help any unmet nutrient
-                continue
-            # "clean" cap: don't exceed any **met** nutrient (tol=0)
-            cap_met_clean = g_cap_met(f, tol=0.0)
-            clean_cap = min(CHUNK_G, hard_cap, cap_unmet, cap_met_clean)
-            # "dirty" (tiny wiggle): allow +2% on met nutrients if needed
-            cap_met_dirty = g_cap_met(f, tol=MET_OVERSHOOT_TOL)
-            dirty_cap = min(CHUNK_G, hard_cap, cap_unmet, cap_met_dirty)
-            sc = score_food(f, d)
-            candidates.append((sc, max(0.0, clean_cap), max(0.0, dirty_cap), f))
+            s = score_food(f, d, w)
+            candidates.append((s, g_cap, f))
 
         if not candidates:
             break
 
-        # Prefer CLEAN additions first; if no clean can progress, allow DIRTY
-        # Sort deterministically by score desc, then name asc
-        candidates.sort(key=lambda x: (-x[0], x[3].name))
+        # Deterministic: highest score first, tie by name
+        candidates.sort(key=lambda x: (-x[0], x[2].name))
 
         progressed = False
-        # Try clean
-        for sc, clean_cap, dirty_cap, f in candidates:
-            add = clean_cap
-            if add > 1e-9:
-                plan[f.name] += add
-                totals["kcal"] = totals.get("kcal", 0.0) + add * (f.kcal_per_100g / 100.0)
-                for k, v in f.per100.items():
-                    totals[k] = totals.get(k, 0.0) + add * (v / 100.0)
-                progressed = True
-                break
-
-        # If no clean move, try tiny dirty (≤2% overshoot on already met mins)
-        if not progressed:
-            for sc, clean_cap, dirty_cap, f in candidates:
-                add = dirty_cap
-                if add > 1e-9:
-                    plan[f.name] += add
-                    totals["kcal"] = totals.get("kcal", 0.0) + add * (f.kcal_per_100g / 100.0)
-                    for k, v in f.per100.items():
-                        totals[k] = totals.get(k, 0.0) + add * (v / 100.0)
-                    progressed = True
-                    break
+        for s, g_cap, f in candidates:
+            add = g_cap
+            if add <= 1e-9:
+                exhausted[f.name] = True
+                continue
+            # apply
+            plan[f.name] += add
+            totals["kcal"] = totals.get("kcal", 0.0) + add * (f.kcal_per_100g / 100.0)
+            for k, v in f.per100.items():
+                totals[k] = totals.get(k, 0.0) + add * (v / 100.0)
+            progressed = True
+            break
 
         if not progressed:
-            # mark top candidate as exhausted to avoid infinite loop
-            exhausted[candidates[0][3].name] = True
-            continue
+            # nothing useful progressed; end
+            break
 
     plan = _omit_near_zero(plan)
     return plan, totals

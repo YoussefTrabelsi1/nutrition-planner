@@ -13,6 +13,7 @@ FOODS_RE = re.compile(r"^(?P<base>[a-z0-9_]+)_(?P<unit>g|mg|mcg)_per_100g$")
 BUDGET_MIN_RE = re.compile(r"^(?P<base>[a-z0-9_]+)_(?P<unit>g|mg|mcg)_remaining$")
 BUDGET_MAX_RE = re.compile(r"^(?P<base>[a-z0-9_]+)_(?P<unit>g|mg|mcg)_limit$")
 
+# Required base columns in foods.csv. "daily_max_g" is OPTIONAL and, if present, is enforced.
 REQUIRED_FOOD_BASE = ["name", "kcal_per_100g", "max_serving_g", "category"]
 
 @dataclass
@@ -22,6 +23,7 @@ class Food:
     max_serving_g: float
     category: str
     per100: Dict[str, float]  # base_with_unit -> value per 100g
+    daily_max_g: float | None = None  # optional per-food daily cap (strict upper bound)
 
 @dataclass
 class Targets:
