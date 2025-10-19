@@ -39,9 +39,8 @@ def _validate_required_food_cols(headers: List[str]) -> None:
 def _detect_food_metrics(headers: List[str]) -> Tuple[Dict[str, str], Dict[str, str]]:
     seen_units: Dict[str, str] = {}
     header_to_key: Dict[str, str] = {}
-
     for h in headers:
-        if h in REQUIRED_FOOD_BASE or h == "daily_max_g":
+        if h in REQUIRED_FOOD_BASE or h in ("daily_max_g", "price_per_100g"):
             continue
         if "_per_100g" in h:
             m = FOODS_RE.match(h)
@@ -58,16 +57,14 @@ def _detect_food_metrics(headers: List[str]) -> Tuple[Dict[str, str], Dict[str, 
             seen_units[base] = unit
             header_to_key[h] = f"{base}_{unit}"
         else:
-            # non-metric extra columns are ignored
+            # ignore other metadata columns
             pass
-
     return seen_units, header_to_key
 
 
 def _detect_budget_targets(headers: List[str]) -> Tuple[Dict[str, str], Dict[str, str]]:
     mins_units: Dict[str, str] = {}
     max_units: Dict[str, str] = {}
-
     for h in headers:
         if h == "kcal_remaining":
             continue
@@ -92,7 +89,6 @@ def _detect_budget_targets(headers: List[str]) -> Tuple[Dict[str, str], Dict[str
         raise SchemaError(
             f"Invalid budget column '{h}'; only '*_remaining', '*_limit', or 'kcal_remaining' are allowed."
         )
-
     return mins_units, max_units
 
 
@@ -117,11 +113,20 @@ def load_problem(
         kcal = _f(row.get("kcal_per_100g"), 0.0)
         maxg = _f(row.get("max_serving_g"), 0.0)
         category = (row.get("category") or "").strip()
+
+        # Optional caps/prices
         daily_max_g = None
         if "daily_max_g" in row and str(row.get("daily_max_g") or "").strip() != "":
             daily_max_g = _f(row.get("daily_max_g"), 0.0)
             if daily_max_g <= 0:
                 raise SchemaError(f"daily_max_g must be > 0 if provided (food '{name}')")
+
+        price_per_100g = None
+        if "price_per_100g" in row and str(row.get("price_per_100g") or "").strip() != "":
+            price_per_100g = _f(row.get("price_per_100g"), 0.0)
+            if price_per_100g < 0:
+                raise SchemaError(f"price_per_100g must be >= 0 if provided (food '{name}')")
+
         if maxg <= 0 or kcal < 0:
             raise SchemaError(
                 f"Invalid numeric in foods for '{name}': max_serving_g>0 and kcal>=0 required"
@@ -136,6 +141,7 @@ def load_problem(
                 raise SchemaError(f"Negative value not allowed in foods column '{h}' for '{name}'")
             per100[key] = x
             all_keys_in_foods.add(key)
+
         foods.append(Food(
             name=name,
             kcal_per_100g=kcal,
@@ -143,6 +149,7 @@ def load_problem(
             category=category,
             per100=per100,
             daily_max_g=daily_max_g,
+            price_per_100g=price_per_100g,
         ))
 
     # Budget
@@ -156,7 +163,6 @@ def load_problem(
         raise SchemaError("budget.csv missing 'kcal_remaining'")
 
     mins_units, max_units = _detect_budget_targets(list(b.keys()))
-
     kcal_remaining = _f(b.get("kcal_remaining"), 0.0)
     if kcal_remaining <= 0:
         raise SchemaError("kcal_remaining must be > 0")
@@ -177,13 +183,13 @@ def load_problem(
             raise SchemaError(f"Negative limit not allowed: {col}")
         maxes[f"{base}_{unit}"] = v
 
-    # Warn about unused dimensions present in foods but not in budget
+    # Warn about unused dimensions
     used_keys = set(mins.keys()) | set(maxes.keys())
     unused = sorted(k for k in all_keys_in_foods if k not in used_keys)
     for k in unused:
         print(f"Warning: '{k}' appears in foods.csv but not in budget.csv; it will not be targeted.")
 
-    # Policies (optional per-category caps; unchanged)
+    # Policies (optional) — unchanged except for pass-through
     category_caps_g: Dict[str, float] | None = None
     p_path = policies_path
     if p_path is None and priorities_path is not None:
@@ -203,7 +209,7 @@ def load_problem(
             canonical[str(k).strip().lower()] = cap
         category_caps_g = canonical if canonical else None
 
-    # Priorities (ticket 7 behavior; unchanged)
+    # Priorities (as before)
     priorities: Dict[str, float] = {}
     toxin_penalty = 0.5
     if priorities_path and priorities_path.exists():
