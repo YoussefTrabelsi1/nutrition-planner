@@ -12,7 +12,7 @@ per_category_daily_max_g:
     Sodium: 2.3
     Iron: 0.04
     Cholecalciferol: 0.0001
-    Magnesium: 0.35
+    Magnesium: 0.05
     Zinc: 0.025
     Potassium: null
     Calcium: 2.5
@@ -29,15 +29,15 @@ per_category_daily_max_g:
     Cobalamin: null
     Iodine: 0.0006
     Selenium: 0.000255
-    Phosphorus: 4.0
+    Phosphorus: 2.92
     Copper: 0.005
-    Manganese: null
+    Manganese: 0.008
     Choline: 3.5
     Ascorbic acid: 2.0
     Phylloquinone: null
     Menaquinones: null
     Retinol: 0.003
-    Alpha-tocopherol: 1.0
+    Alpha-tocopherol: 0.3
     Chloride: null
     Molybdenum: 0.002
     Chromium: null
