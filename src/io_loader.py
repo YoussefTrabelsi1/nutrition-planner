@@ -121,7 +121,7 @@ def load_problem(
         maxg = _f(row.get("max_serving_g"), 0.0)
         category = (row.get("category") or "").strip()
 
-        # Optional caps/prices & new increment/pack meta
+        # Optional meta
         daily_max_g = None
         if (row.get("daily_max_g") or "").strip() != "":
             daily_max_g = _f(row.get("daily_max_g"), 0.0)
@@ -217,13 +217,15 @@ def load_problem(
             raise SchemaError(f"Negative limit not allowed: {col}")
         maxes[f"{base}_{unit}"] = v
 
-    # Warn about unused dimensions
+    # (ROLLED BACK) — removed auto default: no longer setting limit = 2×min when missing.
+
+    # Warn about unused dimensions present in foods but not in budget
     used_keys = set(mins.keys()) | set(maxes.keys())
     unused = sorted(k for k in all_keys_in_foods if k not in used_keys)
     for k in unused:
         print(f"Warning: '{k}' appears in foods.csv but not in budget.csv; it will not be targeted.")
 
-    # Policies (optional) — unchanged passthrough
+    # Policies (optional per-category caps)
     category_caps_g: Dict[str, float] | None = None
     p_path = policies_path
     if p_path is None and priorities_path is not None:
