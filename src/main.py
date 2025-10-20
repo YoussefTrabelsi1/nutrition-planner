@@ -14,17 +14,13 @@ DEFAULT_OUTPUT_DIR = DEFAULT_ROOT / "output"
 
 
 def _unit_from_key(key: str) -> str:
-    if key.endswith("_g"):
-        return "g"
-    if key.endswith("_mg"):
-        return "mg"
-    if key.endswith("_mcg"):
-        return "mcg"
+    if key.endswith("_g"): return "g"
+    if key.endswith("_mg"): return "mg"
+    if key.endswith("_mcg"): return "mcg"
     return ""
 
 
 def _top3_nutrients_for_food(food, mins_keys: list[str]) -> list[str]:
-    # choose top-3 positive per-100g among *min* nutrients (ignore toxins)
     pairs = []
     for k in mins_keys:
         v = food.per100.get(k, 0.0)
@@ -38,15 +34,32 @@ def _top3_nutrients_for_food(food, mins_keys: list[str]) -> list[str]:
     return top
 
 
+def _format_units(food, grams: float) -> str:
+    # Prefer unit_size_g if provided; else fall back to increment_g for display
+    size = getattr(food, "unit_size_g", None) or getattr(food, "increment_g", None)
+    label = getattr(food, "unit_label", None)
+    if not size or size <= 0:
+        return ""
+    count = grams / float(size)
+    if abs(round(count) - count) < 1e-6:
+        count_str = f"{int(round(count))}"
+    else:
+        count_str = f"{count:.2f}"
+    if label:
+        # pluralize naively when not equal to 1
+        suffix = "" if abs(count - 1.0) < 1e-6 else "s"
+        return f" (~{count_str} {label}{suffix})"
+    return f" (~{count_str} units)"
+
+
 def _build_plan_table_text(plan: dict[str, float], foods_obj: dict[str, object], mins_keys: list[str]) -> str:
     if not plan:
         return "No foods selected.\n"
-    # order by grams DESC
     items = sorted(plan.items(), key=lambda kv: (-kv[1], kv[0]))
     name_w = max(len("Food"), *(len(k) for k, _ in items))
     lines = []
-    lines.append(f"{'Food'.ljust(name_w)}  Grams    Cost     Top nutrients (per 100g)")
-    lines.append(f"{'-'*name_w}  -----    ----     -----------------------------")
+    lines.append(f"{'Food'.ljust(name_w)}  Grams    Cost     Top nutrients (per 100g)         Units")
+    lines.append(f"{'-'*name_w}  -----    ----     -----------------------------         -----")
     total_cost = 0.0
     for name, grams in items:
         f = foods_obj[name]
@@ -55,7 +68,8 @@ def _build_plan_table_text(plan: dict[str, float], foods_obj: dict[str, object],
         total_cost += cost
         cost_str = f"{cost:7.2f}" if price100 is not None else "   --  "
         tops = ", ".join(_top3_nutrients_for_food(f, mins_keys)) or "-"
-        lines.append(f"{name.ljust(name_w)}  {grams:7.1f}  {cost_str}  {tops}")
+        units = _format_units(f, grams)
+        lines.append(f"{name.ljust(name_w)}  {grams:7.1f}  {cost_str}  {tops:<35}{units}")
     lines.append(f"{'Total'.ljust(name_w)}  {'':7}  {total_cost:7.2f}")
     return "\n".join(lines) + "\n"
 
@@ -70,7 +84,6 @@ def _build_totals_text(problem, totals: dict[str, float]) -> str:
         unit = _unit_from_key(k)
         lines.append(f"  {k}: {got:.3f}{unit} / {need:.3f}{unit}")
 
-    # Show toxins only if any non-zero usage; hide 0.0 rows
     any_toxin = any(totals.get(k, 0.0) > 0 for k in problem.targets.maxes.keys())
     if any_toxin:
         lines.append("  toxins:")
@@ -114,7 +127,6 @@ def run(
     pol_p = policies or (DEFAULT_DATA / "policies.yaml")
     prob = load_problem(foods_p, budget_p, prio_p, pol_p if pol_p.exists() else None)
 
-    # Try LP with variety & special-category rule
     res = solve_lp_only(
         prob,
         allow_soft=allow_soft,
@@ -130,7 +142,6 @@ def run(
     else:
         plan, totals = res
 
-    # Build the full report text (also printed to console)
     foods_by_name = {f.name: f for f in prob.foods}
     header = f"\nChosen plan ({used})\n"
     body_plan = _build_plan_table_text(plan, foods_by_name, list(prob.targets.mins.keys()))
@@ -140,8 +151,6 @@ def run(
         footer = _build_greedy_miss_text(prob, totals)
 
     report = header + body_plan + body_totals + footer
-
-    # Print to console
     print(report, end="")
 
     # Save to /output with timestamp seconds

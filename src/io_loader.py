@@ -40,7 +40,14 @@ def _detect_food_metrics(headers: List[str]) -> Tuple[Dict[str, str], Dict[str, 
     seen_units: Dict[str, str] = {}
     header_to_key: Dict[str, str] = {}
     for h in headers:
-        if h in REQUIRED_FOOD_BASE or h in ("daily_max_g", "price_per_100g"):
+        if h in REQUIRED_FOOD_BASE or h in (
+            "daily_max_g",
+            "price_per_100g",
+            "increment_g",
+            "unit_size_g",
+            "unit_label",
+            "binary_pack",
+        ):
             continue
         if "_per_100g" in h:
             m = FOODS_RE.match(h)
@@ -114,23 +121,46 @@ def load_problem(
         maxg = _f(row.get("max_serving_g"), 0.0)
         category = (row.get("category") or "").strip()
 
-        # Optional caps/prices
+        # Optional caps/prices & new increment/pack meta
         daily_max_g = None
-        if "daily_max_g" in row and str(row.get("daily_max_g") or "").strip() != "":
+        if (row.get("daily_max_g") or "").strip() != "":
             daily_max_g = _f(row.get("daily_max_g"), 0.0)
             if daily_max_g <= 0:
                 raise SchemaError(f"daily_max_g must be > 0 if provided (food '{name}')")
 
         price_per_100g = None
-        if "price_per_100g" in row and str(row.get("price_per_100g") or "").strip() != "":
+        if (row.get("price_per_100g") or "").strip() != "":
             price_per_100g = _f(row.get("price_per_100g"), 0.0)
             if price_per_100g < 0:
                 raise SchemaError(f"price_per_100g must be >= 0 if provided (food '{name}')")
+
+        increment_g = None
+        if (row.get("increment_g") or "").strip() != "":
+            increment_g = _f(row.get("increment_g"), 0.0)
+            if increment_g <= 0:
+                raise SchemaError(f"increment_g must be > 0 if provided (food '{name}')")
+
+        unit_size_g = None
+        if (row.get("unit_size_g") or "").strip() != "":
+            unit_size_g = _f(row.get("unit_size_g"), 0.0)
+            if unit_size_g <= 0:
+                raise SchemaError(f"unit_size_g must be > 0 if provided (food '{name}')")
+
+        unit_label = (row.get("unit_label") or "").strip() or None
+
+        binary_pack = False
+        if (row.get("binary_pack") or "").strip() != "":
+            val = (row.get("binary_pack") or "").strip().lower()
+            binary_pack = val in ("1", "true", "yes", "y")
 
         if maxg <= 0 or kcal < 0:
             raise SchemaError(
                 f"Invalid numeric in foods for '{name}': max_serving_g>0 and kcal>=0 required"
             )
+
+        if binary_pack and not unit_size_g:
+            raise SchemaError(f"binary_pack=1 requires unit_size_g for '{name}'")
+
         per100: Dict[str, float] = {}
         for h, key in header_to_key.items():
             val = row.get(h, "")
@@ -150,6 +180,10 @@ def load_problem(
             per100=per100,
             daily_max_g=daily_max_g,
             price_per_100g=price_per_100g,
+            increment_g=increment_g,
+            unit_size_g=unit_size_g,
+            unit_label=unit_label,
+            binary_pack=binary_pack,
         ))
 
     # Budget
@@ -189,7 +223,7 @@ def load_problem(
     for k in unused:
         print(f"Warning: '{k}' appears in foods.csv but not in budget.csv; it will not be targeted.")
 
-    # Policies (optional) — unchanged except for pass-through
+    # Policies (optional) — unchanged passthrough
     category_caps_g: Dict[str, float] | None = None
     p_path = policies_path
     if p_path is None and priorities_path is not None:
@@ -209,7 +243,7 @@ def load_problem(
             canonical[str(k).strip().lower()] = cap
         category_caps_g = canonical if canonical else None
 
-    # Priorities (as before)
+    # Priorities
     priorities: Dict[str, float] = {}
     toxin_penalty = 0.5
     if priorities_path and priorities_path.exists():
