@@ -6,11 +6,10 @@ import sys
 import tempfile
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List
-import pandas as pd  # NEW: for robust table rendering
-
+from typing import Dict, List, Optional
 
 import streamlit as st
+import pandas as pd  # for table rendering and budget editing
 
 # Ensure we can import from project root
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,20 +123,6 @@ def _build_greedy_miss_text(problem, totals: Dict[str, float]) -> str:
     return "\n".join(misses[:5]) + "\n"
 
 
-def _problem_from_inputs(
-    foods_file: Path | None,
-    budget_file: Path | None,
-    priorities_file: Path | None,
-    policies_file: Path | None,
-):
-    return load_problem(
-        foods_file or (DEFAULT_DATA / "foods.csv"),
-        budget_file or (DEFAULT_DATA / "budget.csv"),
-        priorities_file or (DEFAULT_DATA / "priorities.yaml"),
-        policies_file if (policies_file and policies_file.exists()) else None,
-    )
-
-
 def _persist_uploaded(uploaded, suffix: str, tempdir: Path) -> Path | None:
     if not uploaded:
         return None
@@ -147,9 +132,65 @@ def _persist_uploaded(uploaded, suffix: str, tempdir: Path) -> Path | None:
     return p
 
 
-# ... keep existing imports ...
+def _load_budget_df(path: Path) -> pd.DataFrame:
+    try:
+        df = pd.read_csv(path)
+        if df.empty:
+            # create empty one-row frame with kcal at least
+            df = pd.DataFrame([{"kcal_remaining": 0.0}])
+        return df
+    except Exception:
+        return pd.DataFrame([{"kcal_remaining": 0.0}])
 
-# (no changes above)
+
+def _edit_budget(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Version-safe budget editor:
+    - Try st.data_editor (newer Streamlit)
+    - Fallback to st.experimental_data_editor (older)
+    - Final fallback: render numeric inputs per column
+    Returns the edited single-row DataFrame.
+    """
+    st.subheader("Edit budget")
+    if df.shape[0] == 0:
+        df = pd.DataFrame([{"kcal_remaining": 0.0}])
+
+    # Ensure single-row (we use only the first row)
+    row = df.iloc[0].copy()
+    # dtype normalize to numeric where possible
+    for c in df.columns:
+        try:
+            row[c] = float(row[c])
+        except Exception:
+            pass
+
+    editable_df = pd.DataFrame([row])
+    try:
+        # Newer Streamlit
+        edited = st.data_editor(editable_df, num_rows="fixed")
+        return edited.reset_index(drop=True).iloc[:1]
+    except Exception:
+        try:
+            # Older Streamlit
+            edited = st.experimental_data_editor(editable_df, num_rows="fixed")  # type: ignore[attr-defined]
+            return edited.reset_index(drop=True).iloc[:1]
+        except Exception:
+            # Fallback: manual inputs
+            cols = list(editable_df.columns)
+            out = {}
+            # Render two columns per row of inputs
+            left, right = st.columns(2)
+            for i, c in enumerate(cols):
+                container = left if i % 2 == 0 else right
+                with container:
+                    val = editable_df.iloc[0][c]
+                    if isinstance(val, (int, float)):
+                        out[c] = st.number_input(c, value=float(val))
+                    else:
+                        # Rare case: non-numeric; keep as text
+                        out[c] = st.text_input(c, value=str(val))
+            return pd.DataFrame([out])
+
 
 # ---------- Streamlit UI ----------
 
@@ -169,64 +210,73 @@ with st.sidebar:
 
     if not use_defaults:
         foods_upl = st.file_uploader("foods.csv", type=["csv"])
-        budget_upl = st.file_uploader("budget.csv", type=["csv"])
+        # Keep budget upload to prefill the editor
+        budget_upl = st.file_uploader("budget.csv (optional, used to prefill editor)", type=["csv"])
         prio_upl = st.file_uploader("priorities.yaml", type=["yaml", "yml"])
         pol_upl = st.file_uploader("policies.yaml (optional)", type=["yaml", "yml"])
 
-    st.header("Options")
-    solver_choice = st.selectbox("Solver", ["Auto (LP→Greedy)", "LP only", "Greedy only"], index=0)
-    allow_soft = st.checkbox("Allow soft constraints (LP)", value=False)
-    seed = st.number_input("Random seed (optional)", value=0, step=1)
-    use_seed = st.checkbox("Enable seed", value=False)
-
+    # Removed seed/solver options per request
     run_btn = st.button("Plan")
 
-# Placeholders for results
+# Load base files (foods/priorities/policies). Budget is edited below.
+foods_p = budget_p = prio_p = pol_p = None
+if not use_defaults:
+    foods_p = _persist_uploaded(foods_upl, "_foods.csv", tempdir)
+    budget_p = _persist_uploaded(budget_upl, "_budget.csv", tempdir)  # may be None
+    prio_p = _persist_uploaded(prio_upl, "_priorities.yaml", tempdir)
+    pol_p = _persist_uploaded(pol_upl, "_policies.yaml", tempdir)
+
+# Build an initial problem just to know min keys for display if needed (safe to skip; we only need the budget here)
+# Instead, we load/prepare the budget for editing:
+if budget_p:
+    budget_df = _load_budget_df(Path(budget_p))
+else:
+    budget_df = _load_budget_df(DEFAULT_DATA / "budget.csv")
+
+# Budget editor (main page)
+edited_budget_df = _edit_budget(budget_df)
+
+# When Plan clicked, write edited budget to a temp CSV and solve
 plan_container = st.container()
 totals_container = st.container()
 download_container = st.container()
 
 if run_btn:
-    # Prepare files
     with st.spinner("Building problem..."):
-        foods_p = budget_p = prio_p = pol_p = None
-        if not use_defaults:
-            foods_p = _persist_uploaded(foods_upl, "_foods.csv", tempdir)
-            budget_p = _persist_uploaded(budget_upl, "_budget.csv", tempdir)
-            prio_p = _persist_uploaded(prio_upl, "_priorities.yaml", tempdir)
-            pol_p = _persist_uploaded(pol_upl, "_policies.yaml", tempdir)
+        # Persist edited budget to a temp file
+        edited_budget_path = tempdir / "edited_budget.csv"
+        try:
+            # Keep column order
+            edited_budget_df.to_csv(edited_budget_path, index=False)
+        except Exception as e:
+            st.error(f"Failed to save edited budget: {e}")
+            st.stop()
 
-        prob = _problem_from_inputs(
-            Path(foods_p) if foods_p else None,
-            Path(budget_p) if budget_p else None,
-            Path(prio_p) if prio_p else None,
+        # Build problem using edited budget
+        prob = load_problem(
+            Path(foods_p) if foods_p else (DEFAULT_DATA / "foods.csv"),
+            edited_budget_path,
+            Path(prio_p) if prio_p else (DEFAULT_DATA / "priorities.yaml"),
             Path(pol_p) if pol_p else None,
         )
 
-    # ---- CHANGED: replace st.toast with a version-safe info message ----
-    st.info("Solving…")  # works across Streamlit versions
+    st.info("Solving…")
 
-    s_val = int(seed) if use_seed else None
-
-    plan = totals = None
-    used = None
-
-    if solver_choice in ("Auto (LP→Greedy)", "LP only"):
-        res = solve_lp_only(prob, allow_soft=allow_soft, seed=s_val, special_categories=["meat", "fish", "fish_canned"])
-        if res is not None:
-            plan, totals = res
-            used = "LP"
-
-    if plan is None:
-        if solver_choice in ("Auto (LP→Greedy)", "Greedy only"):
-            plan, totals = solve_greedy(prob, seed=s_val, special_categories=["meat", "fish", "fish_canned"])
-            used = "greedy"
+    # Auto: try LP; if it fails, fallback to greedy (no seed/options shown)
+    res = solve_lp_only(prob, allow_soft=False, seed=None, special_categories=["meat", "fish", "fish_canned"])
+    used = "LP"
+    if res is None:
+        plan, totals = solve_greedy(prob, seed=None, special_categories=["meat", "fish", "fish_canned"])
+        used = "greedy"
+    else:
+        plan, totals = res
 
     if plan is None:
         st.error("No feasible plan found by LP or Greedy.")
     else:
-        # ... rest of file unchanged ...
         foods_by_name = {f.name: f for f in prob.foods}
+
+        # Build report text (also downloadable)
         header = f"\nChosen plan ({used})\n"
         body_plan = _build_plan_table_text(plan, foods_by_name, list(prob.targets.mins.keys()))
         body_totals = _build_totals_text(prob, totals)
@@ -235,6 +285,7 @@ if run_btn:
             footer = _build_greedy_miss_text(prob, totals)
         report = header + body_plan + body_totals + footer
 
+        # --- Visuals ---
         with plan_container:
             st.subheader(f"Chosen plan ({used})")
             rows = []
@@ -254,21 +305,18 @@ if run_btn:
                 })
             df = pd.DataFrame(rows)
             try:
-                # Newer Streamlit
                 st.dataframe(df, use_container_width=True)
             except TypeError:
                 try:
-                    # Older Streamlit
                     st.dataframe(df)
                 except TypeError:
-                    # Very old versions: fallback to static table
                     st.table(df)
 
         with totals_container:
             st.subheader("Totals")
             st.code(body_totals, language="text")
 
-        # Save & download (unchanged)
+        # Save to /output and provide a download button
         try:
             os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -287,8 +335,8 @@ if run_btn:
                 mime="text/plain",
             )
 
-    # Cleanup temp uploads
-    try:
-        tmpdir_ctx.cleanup()
-    except Exception:
-        pass
+# Cleanup temp uploads
+try:
+    tmpdir_ctx.cleanup()
+except Exception:
+    pass
