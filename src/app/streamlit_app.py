@@ -204,6 +204,7 @@ with tab_overview:
             return ", ".join(f"{k}:{v:.1f}{unit_from_key(k)}/100g" for k, v in pairs[:3])
 
         grid_rows: List[Dict[str, str]] = []
+        bulk_pairs: List[tuple[str, float]] = []  # <<< NEW: collect (name, step grams) for bulk add
         for idx, f in enumerate(shown):
             step = float(getattr(f, "unit_size_g", None) or getattr(f, "increment_g", None) or 50.0)
             why = _top3(f) if show_why else None
@@ -225,6 +226,15 @@ with tab_overview:
                 "why": why,
                 "on_click": _make_add(),
             })
+            bulk_pairs.append((f.name, step))  # <<< NEW
+
+        # <<< NEW: Bulk add control (adds all currently shown suggestions) >>>
+        cols_bulk = st.columns([1, 6])
+        with cols_bulk[0]:
+            if st.button("➕ Add all shown", key=f"add_all_page_{page}"):
+                for name, grams in bulk_pairs:
+                    session_plan.add(name, grams)
+                set_flash(f"Added {len(bulk_pairs)} items from page {page}.", "success")
 
         # 3-column compact grid; "Why" text optional via checkbox
         card_grid(grid_rows, cols=3, show_why=show_why)

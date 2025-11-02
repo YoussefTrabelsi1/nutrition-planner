@@ -163,7 +163,7 @@ def _apply_auto_macros(edited_budget_df: pd.DataFrame, kcal_budget: float, body_
     Only sets *_remaining columns; leaves other mins/limits as they are.
     """
     fat_g = max(0.0, 1.00 * float(body_weight_kg))
-    protein_g = max(0.0, 2.25 * float(body_weight_kg))
+    protein_g = max(0.0, 2.32 * float(body_weight_kg))
     used_kcal = fat_g * 9.0 + protein_g * 4.0
     carbs_kcal = max(0.0, float(kcal_budget) - used_kcal)
     carbs_g = carbs_kcal / 4.0
