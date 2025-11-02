@@ -37,6 +37,21 @@ def _divider() -> None:
     except Exception:
         st.markdown("---")
 
+def _foods_by_name(prob) -> Dict[str, object]:
+    return {f.name: f for f in prob.foods}
+
+def _totals_from_session_plan(session_plan, foods_by_name: Dict[str, object]) -> Dict[str, float]:
+    totals: Dict[str, float] = {"kcal": 0.0, "cost": 0.0}
+    for name, grams in session_plan.grams_by_food.items():
+        f = foods_by_name.get(name)
+        if not f or grams <= 0:
+            continue
+        totals["kcal"] += grams * (f.kcal_per_100g / 100.0)
+        if getattr(f, "price_per_100g", None) is not None:
+            totals["cost"] += grams * (float(f.price_per_100g) / 100.0)
+        for k, v in f.per100.items():
+            totals[k] = totals.get(k, 0.0) + grams * (v / 100.0)
+    return totals
 
 def _top3_nutrients_for_food(food, mins_keys: List[str]) -> List[str]:
     pairs = []
@@ -210,6 +225,17 @@ tab_overview, tab_plan, tab_micros, tab_history = st.tabs(["Overview", "Meal pla
 
 session_plan = get_session_plan()  # manual builder (user “Add” clicks)
 
+def _load_prob_only():
+    # write edited budget to tmp so names/units align; we won't solve here
+    tmp_budget = Path(tempfile.gettempdir()) / f"editor_view_{os.getpid()}.csv"
+    edited_budget_df.to_csv(tmp_budget, index=False)
+    return load_problem(
+        Path(foods_p) if foods_p else (DEFAULT_DATA / "foods.csv"),
+        tmp_budget,
+        Path(prio_p) if prio_p else (DEFAULT_DATA / "priorities.yaml"),
+        Path(pol_p) if pol_p else None,
+    )
+
 def _solve_now():
     edited_budget_path = (Path(tempfile.gettempdir()) / f"edited_budget_{os.getpid()}.csv")
     edited_budget_df.to_csv(edited_budget_path, index=False)
@@ -232,26 +258,40 @@ def _solve_now():
 # ---------------- Overview Tab ----------------
 with tab_overview:
     st.subheader("KPI")
-    consumed_stub = {"kcal": 0.0, "protein_g": 0.0, "carbohydrates_g": 0.0, "fat_g": 0.0, "fiber_g": 0.0}
-    targets_stub = {"kcal": float(edited_budget_df.iloc[0].get("kcal_remaining", 0.0)),
-                    "protein_g": float(edited_budget_df.iloc[0].get("protein_g_remaining", 0.0)),
-                    "carbohydrates_g": float(edited_budget_df.iloc[0].get("carbohydrates_g_remaining", 0.0)),
-                    "fat_g": float(edited_budget_df.iloc[0].get("fat_g_remaining", 0.0)),
-                    "fiber_g": float(edited_budget_df.iloc[0].get("fiber_g_remaining", 0.0))}
-    kpi_strip(
-        consumed={"kcal": consumed_stub["kcal"], "protein": consumed_stub["protein_g"], "carbs": consumed_stub["carbohydrates_g"], "fat": consumed_stub["fat_g"], "fiber": consumed_stub["fiber_g"]},
-        targets={"kcal": targets_stub["kcal"], "protein": targets_stub["protein_g"], "carbs": targets_stub["carbohydrates_g"], "fat": targets_stub["fat_g"], "fiber": targets_stub["fiber_g"]},
-        order=[("Calories", "kcal"), ("Protein (g)", "protein"), ("Carbs (g)", "carbs"), ("Fat (g)", "fat"), ("Fiber (g)", "fiber")],
-    )
-    progress_row(
-        consumed={"protein": consumed_stub["protein_g"], "carbs": consumed_stub["carbohydrates_g"], "fat": consumed_stub["fat_g"], "fiber": consumed_stub["fiber_g"]},
-        targets={"protein": targets_stub["protein_g"], "carbs": targets_stub["carbohydrates_g"], "fat": targets_stub["fat_g"], "fiber": targets_stub["fiber_g"]},
-        keys=["protein", "carbs", "fat", "fiber"]
-    )
-
-    st.markdown("### Suggested foods")
     try:
-        prob, _, _, _ = _solve_now()
+        prob_for_view = _load_prob_only()
+        foods_map = _foods_by_name(prob_for_view)
+        live = _totals_from_session_plan(session_plan, foods_map)  # ← live from added foods
+
+        consumed = {
+            "kcal": live.get("kcal", 0.0),
+            "protein": live.get("protein_g", 0.0),
+            "carbs": live.get("carbohydrates_g", 0.0),
+            "fat": live.get("fat_g", 0.0),
+            "fiber": live.get("fiber_g", 0.0),
+        }
+        targets = {
+            "kcal": float(edited_budget_df.iloc[0].get("kcal_remaining", 0.0)),
+            "protein": prob_for_view.targets.mins.get("protein_g", 0.0),
+            "carbs": prob_for_view.targets.mins.get("carbohydrates_g", 0.0),
+            "fat": prob_for_view.targets.mins.get("fat_g", 0.0),
+            "fiber": prob_for_view.targets.mins.get("fiber_g", 0.0),
+        }
+        kpi_strip(consumed, targets, [
+            ("Calories", "kcal"), ("Protein (g)", "protein"),
+            ("Carbs (g)", "carbs"), ("Fat (g)", "fat"), ("Fiber (g)", "fiber")
+        ])
+        progress_row(consumed, targets, ["protein", "carbs", "fat", "fiber"])
+    except Exception as e:
+        st.warning(f"KPI unavailable: {e}")
+
+    # -------- Suggested foods (compact + pagination) --------
+    st.markdown("### Suggested foods")
+    show_why = st.checkbox("Show why (top nutrients)", value=False)
+    page_size = st.selectbox("Items per page", [6, 9, 12], index=0, key="sugg_page_size")
+    # Build suggestion list (no solve)
+    try:
+        prob = prob_for_view
         mins_keys = list(prob.targets.mins.keys())
         foods = prob.foods
 
@@ -264,30 +304,50 @@ with tab_overview:
                 return False
             return True
 
+        # Simple relevance: protein per kcal, then fiber per kcal, then low kcal
+        def score(f):
+            kcal = max(f.kcal_per_100g, 1e-9)
+            ppk = f.per100.get("protein_g", 0.0) / kcal
+            fibk = f.per100.get("fiber_g", 0.0) / kcal
+            return (ppk * 2.0 + fibk * 0.8, -kcal)
+
+        items = [f for f in foods if include_food(f)]
+        items.sort(key=score, reverse=True)
+
+        # Pagination
+        total = len(items)
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = st.number_input("Page", min_value=1, max_value=pages, value=1, step=1, key="sugg_page")
+        start = (page - 1) * page_size
+        shown = items[start:start + page_size]
+
+        # Build grid rows
+        def _top3(food):
+            pairs = [(k, food.per100.get(k, 0.0)) for k in mins_keys if food.per100.get(k, 0.0) > 0]
+            pairs.sort(key=lambda kv: kv[1], reverse=True)
+            return ", ".join(f"{k}:{v:.1f}{unit_from_key(k)}/100g" for k, v in pairs[:3])
+
         grid_rows: List[Dict[str, str]] = []
-        for idx, f in enumerate(foods):
-            if not include_food(f):
-                continue
-            kcal = f.kcal_per_100g
+        for idx, f in enumerate(shown):
             step = float(getattr(f, "unit_size_g", None) or getattr(f, "increment_g", None) or 50.0)
-            top3 = ", ".join(_top3_nutrients_for_food(f, mins_keys))
+            why = _top3(f) if show_why else None
             def _make_add(name=f.name, grams=step):
                 def _do():
                     session_plan.add(name, grams)
                     set_flash(f"Added {grams:.0f} g {name}", "success")
                 return _do
             grid_rows.append({
-                "key": f"sugg_{idx}",
+                "key": f"sugg_{start+idx}",
                 "name": f.name,
                 "serving": f"{int(step)} g",
-                "kcal": int(round(kcal * step / 100.0)),
+                "kcal": int(round(f.kcal_per_100g * step / 100.0)),
                 "P": round(f.per100.get("protein_g", 0.0) * step / 100.0, 1),
                 "C": round(f.per100.get("carbohydrates_g", 0.0) * step / 100.0, 1),
                 "F": round(f.per100.get("fat_g", 0.0) * step / 100.0, 1),
-                "why": top3,
+                "why": why,
                 "on_click": _make_add(),
             })
-        card_grid(grid_rows, cols=4)
+        card_grid(grid_rows, cols=3, show_why=show_why)
     except Exception as e:
         st.warning(f"Suggestions unavailable: {e}")
 

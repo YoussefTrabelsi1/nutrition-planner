@@ -1,6 +1,5 @@
 from __future__ import annotations
-from typing import Dict, List, Tuple
-import math
+from typing import Dict, List, Tuple, Optional
 import pandas as pd
 import streamlit as st
 
@@ -42,18 +41,19 @@ def progress_row(consumed: Dict[str, float], targets: Dict[str, float], keys: Li
         label = f"{k.capitalize()} {int(pct*100)}%"
         with cols[i]:
             try:
-                # Newer Streamlit
                 st.progress(pct, text=label)  # type: ignore[call-arg]
             except TypeError:
-                # Older Streamlit: no `text` arg
                 st.caption(label)
                 st.progress(pct)
             except Exception:
-                # Last resort
                 st.caption(label)
 
 
-def card_grid(foods_rows: List[Dict[str, str]], cols: int = 4) -> None:
+def card_grid(foods_rows: List[Dict[str, str]], cols: int = 3, show_why: bool = False) -> None:
+    """
+    Compact responsive card grid.
+    Each item dict needs: name, serving, kcal, P, C, F, key, on_click, (optional) why.
+    """
     if not foods_rows:
         st.info("No foods match your filters. Try relaxing the search.")
         return
@@ -69,7 +69,6 @@ def card_grid(foods_rows: List[Dict[str, str]], cols: int = 4) -> None:
                 st.markdown(f"**{f['name']}**")
                 st.caption(f"{f['serving']} • {f['kcal']} kcal")
                 st.text(f"P {f['P']}g • C {f['C']}g • F {f['F']}g")
-                why = f.get("why")
-                if why:
-                    st.caption(f"Why: {why}")
+                if show_why and f.get("why"):
+                    st.caption(f"Why: {f['why']}")
                 st.button(f"➕ Add {f['name']}", key=f"add_{f['key']}", on_click=f['on_click'])
